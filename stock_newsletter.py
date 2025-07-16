@@ -8,6 +8,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 import json
 import os
+import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "your_secret_key")  # Use env variable in production
@@ -18,7 +24,7 @@ SENDER_EMAIL = os.getenv("SENDER_EMAIL", "your_email@gmail.com")
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "your_app_password")
 
 # Database Setup (PostgreSQL)
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///stocks.db")  # Fallback to SQLite for local dev
+app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///stocks.db").replace("postgres://", "postgresql://")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
@@ -175,7 +181,7 @@ def signup():
             user = User(email=email, password=generate_password_hash(password))
             db.session.add(user)
             db.session.commit()
-            flash("Sign up successful! AscendingDescending! Please log in.")
+            flash("Sign up successful! Please log in.")
             return redirect(url_for("login"))
         except Exception as e:
             flash("Email already exists.")
@@ -201,9 +207,7 @@ def dashboard():
     if "user_id" not in session:
         return redirect(url_for("login"))
     user = User.query.get(session["user_id"])
-    holdings = user.holdings
-    watchlist = user.watchlist
-    return render_template_string(dashboard_template, user_email=session["user_email"], holdings=holdings, watchlist=watchlist)
+    return render_template_string(dashboard_template, user_email=session["user_email"], holdings=user.holdings, watchlist=user.watchlist)
 
 @app.route("/add_stock", methods=["POST"])
 def add_stock():
@@ -237,9 +241,18 @@ def logout():
     session.pop("user_email", None)
     return redirect(url_for("login"))
 
+@app.route("/send_newsletters", methods=["POST"])
+def trigger_newsletters():
+    if request.form.get("token") != os.getenv("SCHEDULER_TOKEN"):
+        return "Unauthorized", 401
+    with app.app_context():
+        send_newsletters()
+    return "Newsletters sent", 200
+
 # Newsletter Logic
 def fetch_stock_news(symbol):
     """Fetch recent news for a given stock symbol using Alpha Vantage."""
+    time.sleep(12)  # Respect Alpha Vantage rate limit (5 calls/min)
     url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={symbol}&limit=3&apikey={ALPHA_VANTAGE_API_KEY}"
     try:
         response = requests.get(url)
@@ -248,11 +261,12 @@ def fetch_stock_news(symbol):
         news_items = data.get("feed", [])
         return news_items[:3]
     except requests.RequestException as e:
-        print(f"Error fetching news for {symbol}: {e}")
+        logger.error(f"Error fetching news for {symbol}: {e}")
         return []
 
 def fetch_stock_performance(symbol):
     """Fetch weekly stock performance data including high, low, and change using Alpha Vantage."""
+    time.sleep(12)  # Respect Alpha Vantage rate limit (5 calls/min)
     url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={ALPHA_VANTAGE_API_KEY}"
     try:
         response = requests.get(url)
@@ -280,7 +294,7 @@ def fetch_stock_performance(symbol):
             "weekly_low": weekly_low
         }
     except (requests.RequestException, KeyError, ValueError) as e:
-        print(f"Error fetching performance for {symbol}: {e}")
+        logger.error(f"Error fetching performance for {symbol}: {e}")
         return None
 
 def create_newsletter(user_email, stocks):
@@ -367,22 +381,29 @@ def send_email(recipient_email, html_content):
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
         server.quit()
-        print(f"Newsletter sent to {recipient_email}")
+        logger.info(f"Newsletter sent to {recipient_email}")
     except Exception as e:
-        print(f"Error sending email to {recipient_email}: {e}")
+        logger.error(f"Error sending email to {recipient_email}: {e}")
 
 def send_newsletters():
     """Send newsletters to all users with their stocks."""
-    users = User.query.all()
-    for user in users:
-        stocks = [h.symbol for h in user.holdings] + [w.symbol for w in user.watchlist]
-        if stocks:
-            newsletter_content = create_newsletter(user.email, stocks)
-            send_email(user.email, newsletter_content)
+    try:
+        users = User.query.all()
+        for user in users:
+            stocks = [h.symbol for h in user.holdings] + [w.symbol for w in user.watchlist]
+            if stocks:
+                newsletter_content = create_newsletter(user.email, stocks)
+                send_email(user.email, newsletter_content)
+    except Exception as e:
+        logger.error(f"Error sending newsletters: {e}")
 
-# Initialize database
-with app.app_context():
-    db.create_all()
+# Initialize database with error handling
+try:
+    with app.app_context():
+        db.create_all()
+        logger.info("Database tables created successfully")
+except Exception as e:
+    logger.error(f"Error initializing database: {e}")
 
 if __name__ == "__main__":
     import sys
@@ -390,8 +411,9 @@ if __name__ == "__main__":
         with app.app_context():
             send_newsletters()
     else:
-        app.run(debug=True)
-# To run the Flask app: python stock_newsletter_app.py
-# To send newsletters: python stock_newsletter_app.py send_newsletters
-# Schedule the newsletter with a cron job (every Monday at 9 AM) on Render:
-# 0 9 * * 1 /usr/bin/python3 /app/stock_newsletter_app.py send_newsletters
+        port = int(os.getenv("PORT", 5000))
+        app.run(host="0.0.0.0", port=port, debug=os.getenv("FLASK_ENV") == "development")
+# To run the Flask app locally: python stock_newsletter.py
+# To send newsletters: python stock_newsletter.py send_newsletters
+# Schedule newsletters with Google Cloud Scheduler or Render cron job (paid tier):
+# POST to /send_newsletters with token in the request body
