@@ -10,6 +10,7 @@ import json
 import os
 import time
 import logging
+from sqlalchemy.exc import OperationalError, DatabaseError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -178,13 +179,22 @@ def signup():
         email = request.form["email"]
         password = request.form["password"]
         try:
+            user = User.query.filter_by(email=email).first()
+            if user:
+                flash("Email already exists.")
+                return redirect(url_for("signup"))
             user = User(email=email, password=generate_password_hash(password))
             db.session.add(user)
             db.session.commit()
             flash("Sign up successful! Please log in.")
             return redirect(url_for("login"))
+        except (OperationalError, DatabaseError) as e:
+            logger.error(f"Database error during signup: {e}")
+            flash("Unable to sign up due to a database issue. Please try again later.")
+            return redirect(url_for("signup"))
         except Exception as e:
-            flash("Email already exists.")
+            logger.error(f"Unexpected error during signup: {e}")
+            flash("An unexpected error occurred. Please try again.")
             return redirect(url_for("signup"))
     return render_template_string(signup_template)
 
@@ -193,21 +203,31 @@ def login():
     if request.method == "POST":
         email = request.form["email"]
         password = request.form["password"]
-        user = User.query.filter_by(email=email).first()
-        if user and check_password_hash(user.password, password):
-            session["user_id"] = user.id
-            session["user_email"] = user.email
-            return redirect(url_for("dashboard"))
-        flash("Invalid email or password.")
-        return redirect(url_for("login"))
+        try:
+            user = User.query.filter_by(email=email).first()
+            if user and check_password_hash(user.password, password):
+                session["user_id"] = user.id
+                session["user_email"] = user.email
+                return redirect(url_for("dashboard"))
+            flash("Invalid email or password.")
+            return redirect(url_for("login"))
+        except (OperationalError, DatabaseError) as e:
+            logger.error(f"Database error during login: {e}")
+            flash("Unable to log in due to a database issue. Please try again later.")
+            return redirect(url_for("login"))
     return render_template_string(login_template)
 
 @app.route("/dashboard")
 def dashboard():
     if "user_id" not in session:
         return redirect(url_for("login"))
-    user = User.query.get(session["user_id"])
-    return render_template_string(dashboard_template, user_email=session["user_email"], holdings=user.holdings, watchlist=user.watchlist)
+    try:
+        user = User.query.get(session["user_id"])
+        return render_template_string(dashboard_template, user_email=session["user_email"], holdings=user.holdings, watchlist=user.watchlist)
+    except (OperationalError, DatabaseError) as e:
+        logger.error(f"Database error during dashboard: {e}")
+        flash("Unable to load dashboard due to a database issue. Please try again later.")
+        return redirect(url_for("login"))
 
 @app.route("/add_stock", methods=["POST"])
 def add_stock():
@@ -220,8 +240,10 @@ def add_stock():
         stock = Model(user_id=session["user_id"], symbol=symbol)
         db.session.add(stock)
         db.session.commit()
-    except Exception:
+    except (OperationalError, DatabaseError) as e:
+        logger.error(f"Database error during add_stock: {e}")
         db.session.rollback()
+        flash("Unable to add stock due to a database issue.")
     return redirect(url_for("dashboard"))
 
 @app.route("/remove_stock/<list_type>/<symbol>")
@@ -229,16 +251,20 @@ def remove_stock(list_type, symbol):
     if "user_id" not in session:
         return redirect(url_for("login"))
     Model = Holding if list_type == "holdings" else Watchlist
-    stock = Model.query.filter_by(user_id=session["user_id"], symbol=symbol).first()
-    if stock:
-        db.session.delete(stock)
-        db.session.commit()
+    try:
+        stock = Model.query.filter_by(user_id=session["user_id"], symbol=symbol).first()
+        if stock:
+            db.session.delete(stock)
+            db.session.commit()
+    except (OperationalError, DatabaseError) as e:
+        logger.error(f"Database error during remove_stock: {e}")
+        flash("Unable to remove stock due to a database issue.")
     return redirect(url_for("dashboard"))
 
 @app.route("/logout")
 def logout():
     session.pop("user_id", None)
-    session.pop("user_email", None)
+    session["user_email"] = None
     return redirect(url_for("login"))
 
 @app.route("/send_newsletters", methods=["POST"])
@@ -394,8 +420,10 @@ def send_newsletters():
             if stocks:
                 newsletter_content = create_newsletter(user.email, stocks)
                 send_email(user.email, newsletter_content)
+    except (OperationalError, DatabaseError) as e:
+        logger.error(f"Database error during send_newsletters: {e}")
     except Exception as e:
-        logger.error(f"Error sending newsletters: {e}")
+        logger.error(f"Unexpected error during send_newsletters: {e}")
 
 # Initialize database with error handling
 try:
@@ -411,7 +439,7 @@ if __name__ == "__main__":
         with app.app_context():
             send_newsletters()
     else:
-        port = int(os.getenv("PORT", 5000))
+        port = int(os.getenv("PORT", 10000))
         app.run(host="0.0.0.0", port=port, debug=os.getenv("FLASK_ENV") == "development")
 # To run the Flask app locally: python stock_newsletter.py
 # To send newsletters: python stock_newsletter.py send_newsletters
