@@ -1,0 +1,8 @@
+# Configuration
+ALPHA_VANTAGE_API_KEY = "C8TAK1YJSSW6MU2J"  # Replace with your Alpha Vantage API key
+SENDER_EMAIL = "kennethwalltv@gmail.com"  # Replace with your Gmail address
+SENDER_PASSWORD = "ruox vulw wpfn wuhb"  # Replace with your Gmail App Password
+RECIPIENT_EMAIL = "wall.91@icloud.com"  # Replace with recipient's email
+STOCKS = ["AAPL", "MSFT", "GOOGL"]  # List of stocks to track
+
+app.secret_key = "2e0UHI;~piy8{zzU"  # Replace with a secure random key in production
